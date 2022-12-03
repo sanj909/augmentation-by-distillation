@@ -1,3 +1,21 @@
+"""
+Used to generate expert trajectories
+
+The following command will train 100 ConvNet models on CIFAR-100 with ZCA whitening for 50 epochs each:
+python buffer.py --dataset=CIFAR100 --model=ConvNet --train_epochs=50 --num_experts=100 --zca --buffer_path={path_to_buffer_storage} --data_path={path_to_dataset}
+
+Todo:
+- To generate trajectories using the original data, I don't need to change anything here. 
+- To generate trajectories with InstaAug augmented data, then I need to change stuff here.
+
+Run commands
+python3 buffer.py --dataset=CIFAR10 --model=ConvNet --train_epochs=5 --num_experts=1 --zca --buffer_path=./cifar-10-buffers --data_path=./cifar-10
+
+Working log:
+It runs! But it is doing differentiable Siamese augmentation. 
+I wanted to do the same thing, but with InstaAug: not differentiable Siamese. This is close enough for now.
+"""
+
 import os
 import argparse
 import torch
@@ -10,6 +28,7 @@ import copy
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+
 def main(args):
 
     args.dsa = True if args.dsa == 'True' else False
@@ -17,7 +36,7 @@ def main(args):
     args.dsa_param = ParamDiffAug()
 
     channel, im_size, num_classes, class_names, mean, std, dst_train, dst_test, testloader, loader_train_dict, class_map, class_map_inv = get_dataset(args.dataset, args.data_path, args.batch_real, args.subset, args=args)
-
+    
     # print('\n================== Exp %d ==================\n '%exp)
     print('Hyper-parameters: \n', args.__dict__)
 
@@ -116,14 +135,18 @@ if __name__ == '__main__':
     parser.add_argument('--lr_teacher', type=float, default=0.01, help='learning rate for updating network parameters')
     parser.add_argument('--batch_train', type=int, default=256, help='batch size for training networks')
     parser.add_argument('--batch_real', type=int, default=256, help='batch size for real loader')
+
     parser.add_argument('--dsa', type=str, default='True', choices=['True', 'False'],
                         help='whether to use differentiable Siamese augmentation.')
     parser.add_argument('--dsa_strategy', type=str, default='color_crop_cutout_flip_scale_rotate',
                         help='differentiable Siamese augmentation strategy')
+
     parser.add_argument('--data_path', type=str, default='data', help='dataset path')
     parser.add_argument('--buffer_path', type=str, default='./buffers', help='buffer path')
     parser.add_argument('--train_epochs', type=int, default=50)
+
     parser.add_argument('--zca', action='store_true')
+
     parser.add_argument('--decay', action='store_true')
     parser.add_argument('--mom', type=float, default=0, help='momentum')
     parser.add_argument('--l2', type=float, default=0, help='l2 regularization')
@@ -131,5 +154,3 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     main(args)
-
-

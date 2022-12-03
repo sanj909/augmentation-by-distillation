@@ -14,6 +14,11 @@ from torchvision import datasets, transforms
 from scipy.ndimage.interpolation import rotate as scipyrotate
 from networks import MLP, ConvNet, LeNet, AlexNet, VGG11BN, VGG11, ResNet18, ResNet18BN_AP, ResNet18_AP
 
+# Without this block, we get a <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED]
+# When trying to download CIFAR 10
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+
 class Config:
     imagenette = [0, 217, 482, 491, 497, 566, 569, 571, 574, 701]
 
