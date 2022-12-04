@@ -124,12 +124,8 @@ def main(args):
         idx_shuffle = np.random.permutation(indices_class[c])[:n]
         return images_all[idx_shuffle]
 
-    import pdb; pdb.set_trace()
-
-
     #--------------------------------------------------------------------------#
     #--------------------------------------------------------------------------#
-
     ''' initialize the synthetic data '''
     """
     label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9]
@@ -158,7 +154,7 @@ def main(args):
 
 
 
-    """
+    """ MODIFICATIONS
     Instead of initialising synthetic data, we want to initialise a network.
     We call this a 'distillation network', and refer to it as phi.
 
@@ -183,16 +179,12 @@ def main(args):
     image.
     """
 
-
-
     ''' initialise distillation network phi, and synthetic learning rate '''
-    syn_lr = torch.tensor(args.lr_teacher).to(args.device)
-
-    class MLP_dist(nn.Module):
+    class DistNet(nn.Module):
         def __init__(self, channel, num_classes):
-            super(MLP_dist, self).__init__()
-            self.fc_1 = nn.Linear(28*28*1 if channel==1 else 32*32*3, 16)
-            self.fc_2 = nn.Linear(16, 16)
+            super(DistNet, self).__init__()
+            self.conv1 = nn.Conv2d(3, 6, 3, stride=1)
+            self.conv2 = nn.Conv2d(6, 3, 3, stride=1)
             self.fc_3 = nn.Linear(16, num_classes)
 
         def forward(self, x):
@@ -202,15 +194,33 @@ def main(args):
             out = self.fc_3(out)
             return out
 
-    # See the call to method 'get_dataset' on Line 45 above.
-    phi = MLP_dist(channel, num_classes)
+    # Code for phi is modified from networks.py:
+    #   make output shape the same as input shape, this network is meant to 
+    #   'transform' images.
+    # Note:
+    #   channel==1 is only for black and white images I guess
+    #   The fact that the size if channel==1 is 28x28 implies to me that it's 
+    #       probably only meant for MNIST.
 
-    """ 
-    Search for every instance of label_syn, image_syn and replace them.
+    #phi = MLP_dist(channel, num_classes)
 
-    image_syn is a torch.tensor, but phi is a network.
-    """
+    phi = nn.Conv2d(3, 3, 3, stride=2)
+
+    syn_lr = torch.tensor(args.lr_teacher).to(args.device)
+
+
+    # testing stuff
+
+    # We reuse code which was used to init synthetic data in the distillation algorithm
+    label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9] if args.ipc=3, num_classes=10
+    image_real = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
+    image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
     
+    import pdb; pdb.set_trace()
+    
+    # Now pass these images through phi to get 'synthetic' images
+    image_syn = phi(image_real)
+
 
     #--------------------------------------------------------------------------#
     #--------------------------------------------------------------------------#
@@ -219,15 +229,19 @@ def main(args):
     ''' training '''
     #image_syn = image_syn.detach().to(args.device).requires_grad_(True)
     phi.to(args.device)
+
     syn_lr = syn_lr.detach().to(args.device).requires_grad_(True)
+
     #optimizer_img = torch.optim.SGD([image_syn], lr=args.lr_img, momentum=0.5)
     optimizer_img = torch.optim.SGD(phi.parameters(), lr=args.lr_img, momentum=0.5)
+    
     optimizer_lr = torch.optim.SGD([syn_lr], lr=args.lr_lr, momentum=0.5)
     optimizer_img.zero_grad()
 
     criterion = nn.CrossEntropyLoss().to(args.device)
     print('%s training begins'%get_time())
 
+    ''' Get Expert Trajectories '''
     expert_dir = os.path.join(args.buffer_path, args.dataset)
     if args.dataset == "ImageNet":
         expert_dir = os.path.join(expert_dir, args.subset, str(args.res))
@@ -236,6 +250,9 @@ def main(args):
     expert_dir = os.path.join(expert_dir, args.model)
     print("Expert Dir: {}".format(expert_dir))
 
+    # Description for this parameter:
+    #   only use if you can fit all expert trajectories into RAM
+    # So we won't run the program with argument '--load_all'
     if args.load_all:
         buffer = []
         n = 0
@@ -274,6 +291,9 @@ def main(args):
         # writer.add_scalar('Progress', it, it)
         wandb.log({"Progress": it}, step=it)
         ''' Evaluate synthetic data '''
+        # What I think this block does:
+        #   inits a random model
+        #   trains it on the current version of the synthetic dataset
         if it in eval_it_pool:
             for model_eval in model_eval_pool:
                 print('-------------------------\nEvaluation\nmodel_train = %s, model_eval = %s, iteration = %d'%(args.model, model_eval, it))
@@ -287,6 +307,16 @@ def main(args):
                 accs_train = []
                 for it_eval in range(args.num_eval):
                     net_eval = get_network(model_eval, channel, num_classes, im_size).to(args.device) # get a random model
+
+
+                    """ Sample a random batch of images and corresponding labels """
+                    # We reuse code which was used to init synthetic data in the distillation algorithm
+                    label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9] if args.ipc=3, num_classes=10
+                    image_real = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
+                    image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
+                    # Now pass these images through phi to get 'synthetic' images
+                    image_syn = phi(image_real)
+
 
                     eval_labs = label_syn
                     with torch.no_grad():
