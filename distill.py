@@ -117,7 +117,11 @@ def main(args):
         return images_all[idx_shuffle]
 
 
+    #--------------------------------------------------------------------------#
+    #--------------------------------------------------------------------------#
+
     ''' initialize the synthetic data '''
+    """
     label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9]
 
     if args.texture:
@@ -140,6 +144,53 @@ def main(args):
             image_syn.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
     else:
         print('initialize synthetic data from random noise')
+    #"""
+
+
+
+    """
+    Instead of initialising synthetic data, we want to initialise a network.
+    We call this a 'distillation network', and refer to it as phi.
+
+    Above, they initialise three variables:
+        label_syn
+        image_syn
+        syn_lr
+
+    We can init syn_lr as above, as the learning rate for phi (which is also learned).
+
+    In the block below we need to define a network:
+        What architecture do we use? 
+            For the first try, just to get the code to run, use a basic MLP.
+        How complex should it be? 
+            For CIFAR-10, 10 synthetic images (1 per class), 32x32 images, we 
+            have 1024 * 10 = 10240 parameters.
+    """
+
+
+
+    ''' initialise distillation network phi, and synthetic learning rate '''
+    syn_lr = torch.tensor(args.lr_teacher).to(args.device)
+
+    class MLP_dist(nn.Module):
+    def __init__(self, channel, num_classes):
+        super(MLP, self).__init__()
+        self.fc_1 = nn.Linear(28*28*1 if channel==1 else 32*32*3, 16)
+        self.fc_2 = nn.Linear(16, 16)
+        self.fc_3 = nn.Linear(16, num_classes)
+
+    def forward(self, x):
+        out = x.view(x.size(0), -1)
+        out = F.relu(self.fc_1(out))
+        out = F.relu(self.fc_2(out))
+        out = self.fc_3(out)
+        return out
+
+    image_syn = MLP_dist(1, 10)
+    
+
+    #--------------------------------------------------------------------------#
+    #--------------------------------------------------------------------------#
 
 
     ''' training '''

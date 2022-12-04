@@ -1,5 +1,5 @@
 """
-Used to generate expert trajectories
+Used to generate expert trajectories.
 
 The following command will train 100 ConvNet models on CIFAR-100 with ZCA whitening for 50 epochs each:
 python buffer.py --dataset=CIFAR100 --model=ConvNet --train_epochs=50 --num_experts=100 --zca --buffer_path={path_to_buffer_storage} --data_path={path_to_dataset}
@@ -9,11 +9,13 @@ Todo:
 - To generate trajectories with InstaAug augmented data, then I need to change stuff here.
 
 Run commands
-python3 buffer.py --dataset=CIFAR10 --model=ConvNet --train_epochs=5 --num_experts=1 --zca --buffer_path=./cifar-10-buffers --data_path=./cifar-10
+python3 buffer.py --dataset=CIFAR10 --model=ConvNet --train_epochs=10 --num_experts=5 --zca --buffer_path=./cifar-10-buffers --data_path=./cifar-10
+Note: I used cs330 env, I had to 'pip install kornia' before running. Everything else was already in cs330 env.
 
 Working log:
-It runs! But it is doing differentiable Siamese augmentation. 
-I wanted to do the same thing, but with InstaAug: not differentiable Siamese. This is close enough for now.
+It runs! But it is doing differentiable Siamese augmentation, and zca whitening.
+I wanted to do the same thing, but with InstaAug: not differentiable Siamese. Still, I will leave it in for now.
+Not sure what to do about zca whitening. I'll leave it in for now.
 """
 
 import os
@@ -150,7 +152,8 @@ if __name__ == '__main__':
     parser.add_argument('--decay', action='store_true')
     parser.add_argument('--mom', type=float, default=0, help='momentum')
     parser.add_argument('--l2', type=float, default=0, help='l2 regularization')
-    parser.add_argument('--save_interval', type=int, default=10)
+
+    parser.add_argument('--save_interval', type=int, default=1)
 
     args = parser.parse_args()
     main(args)
