@@ -6,6 +6,14 @@ python distill.py --dataset=CIFAR100 --ipc=1 --syn_steps=20 --expert_epochs=3 --
 
 Todo:
 - This file needs to be modified to update a network instead of updating a synthetic dataset.
+
+Run commands
+python distill.py --dataset=CIFAR10 --ipc=1 --syn_steps=5 --expert_epochs=3 --max_start_epoch=4 --zca --lr_img=1000 --lr_lr=1e-05 --lr_teacher=0.01 --buffer_path=./cifar-10-buffers --data_path=./cifar-10
+Note: I used cs330 env, I had to 'pip install wandb' before running. Everything else was already in cs330 env.
+
+Notes:
+    The parameter 'ipc' doesn't matter for us (images per class)
+
 """
 
 import os
@@ -116,6 +124,8 @@ def main(args):
         idx_shuffle = np.random.permutation(indices_class[c])[:n]
         return images_all[idx_shuffle]
 
+    import pdb; pdb.set_trace()
+
 
     #--------------------------------------------------------------------------#
     #--------------------------------------------------------------------------#
@@ -157,14 +167,20 @@ def main(args):
         image_syn
         syn_lr
 
-    We can init syn_lr as above, as the learning rate for phi (which is also learned).
+    We can init syn_lr as above, as the learning rate for the network phi
+    This learning rate is also learned, in the style of MAML.
+
 
     In the block below we need to define a network:
         What architecture do we use? 
-            For the first try, just to get the code to run, use a basic MLP.
-        How complex should it be? 
+            For the first try, just to get the code to run, use an MLP.
+        How complex should it be?
             For CIFAR-10, 10 synthetic images (1 per class), 32x32 images, we 
-            have 1024 * 10 = 10240 parameters.
+            have 1024 * 10 = 10240 parameters. An MLP has at minimum 32x32x3 
+
+    We also need to deal with labels. We will define the ground truth labels of 
+    each augmented image to be the same as the label of the corresponding input 
+    image.
     """
 
 
@@ -173,20 +189,27 @@ def main(args):
     syn_lr = torch.tensor(args.lr_teacher).to(args.device)
 
     class MLP_dist(nn.Module):
-    def __init__(self, channel, num_classes):
-        super(MLP, self).__init__()
-        self.fc_1 = nn.Linear(28*28*1 if channel==1 else 32*32*3, 16)
-        self.fc_2 = nn.Linear(16, 16)
-        self.fc_3 = nn.Linear(16, num_classes)
+        def __init__(self, channel, num_classes):
+            super(MLP_dist, self).__init__()
+            self.fc_1 = nn.Linear(28*28*1 if channel==1 else 32*32*3, 16)
+            self.fc_2 = nn.Linear(16, 16)
+            self.fc_3 = nn.Linear(16, num_classes)
 
-    def forward(self, x):
-        out = x.view(x.size(0), -1)
-        out = F.relu(self.fc_1(out))
-        out = F.relu(self.fc_2(out))
-        out = self.fc_3(out)
-        return out
+        def forward(self, x):
+            out = x.view(x.size(0), -1)
+            out = F.relu(self.fc_1(out))
+            out = F.relu(self.fc_2(out))
+            out = self.fc_3(out)
+            return out
 
-    image_syn = MLP_dist(1, 10)
+    # See the call to method 'get_dataset' on Line 45 above.
+    phi = MLP_dist(channel, num_classes)
+
+    """ 
+    Search for every instance of label_syn, image_syn and replace them.
+
+    image_syn is a torch.tensor, but phi is a network.
+    """
     
 
     #--------------------------------------------------------------------------#
@@ -194,9 +217,11 @@ def main(args):
 
 
     ''' training '''
-    image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+    #image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+    phi.to(args.device)
     syn_lr = syn_lr.detach().to(args.device).requires_grad_(True)
-    optimizer_img = torch.optim.SGD([image_syn], lr=args.lr_img, momentum=0.5)
+    #optimizer_img = torch.optim.SGD([image_syn], lr=args.lr_img, momentum=0.5)
+    optimizer_img = torch.optim.SGD(phi.parameters(), lr=args.lr_img, momentum=0.5)
     optimizer_lr = torch.optim.SGD([syn_lr], lr=args.lr_lr, momentum=0.5)
     optimizer_img.zero_grad()
 
