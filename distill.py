@@ -8,7 +8,7 @@ Todo:
 - This file needs to be modified to update a network instead of updating a synthetic dataset.
 
 Run commands
-python distill.py --dataset=CIFAR10 --ipc=1 --syn_steps=5 --expert_epochs=3 --max_start_epoch=4 --zca --lr_img=1000 --lr_lr=1e-05 --lr_teacher=0.01 --buffer_path=./cifar-10-buffers --data_path=./cifar-10
+python distill.py --dataset=CIFAR10 --ipc=1 --syn_steps=5 --expert_epochs=3 --max_start_epoch=4 --zca --lr_img=1000 --lr_lr=1e-05 --lr_teacher=0.01 --buffer_path=./cifar-10-buffers --data_path=./cifar-10 --Iteration 100 --eval_it 10
 Note: I used cs330 env, I had to 'pip install wandb' before running. Everything else was already in cs330 env.
 
 Notes:
@@ -51,6 +51,7 @@ def main(args):
 
     eval_it_pool = np.arange(0, args.Iteration + 1, args.eval_it).tolist()
     channel, im_size, num_classes, class_names, mean, std, dst_train, dst_test, testloader, loader_train_dict, class_map, class_map_inv = get_dataset(args.dataset, args.data_path, args.batch_real, args.subset, args=args)
+    # Default eval_mode is 'S', which means to evaluate with the same architecture as student network
     model_eval_pool = get_eval_pool(args.eval_mode, args.model, args.model)
 
     im_res = im_size[0]
@@ -181,46 +182,43 @@ def main(args):
 
     ''' initialise distillation network phi, and synthetic learning rate '''
     class DistNet(nn.Module):
-        def __init__(self, channel, num_classes):
+        def __init__(self):
             super(DistNet, self).__init__()
-            self.conv1 = nn.Conv2d(3, 6, 3, stride=1)
-            self.conv2 = nn.Conv2d(6, 3, 3, stride=1)
-            self.fc_3 = nn.Linear(16, num_classes)
+            self.conv = nn.Conv2d(3, 6, 3, stride=1)
+            #torch.nn.init.xavier_uniform(self.conv.weight)
+            #torch.nn.init.normal_(self.conv.weight)
+            self.deconv = nn.ConvTranspose2d(6, 3, 3, stride=1)
 
         def forward(self, x):
-            out = x.view(x.size(0), -1)
-            out = F.relu(self.fc_1(out))
-            out = F.relu(self.fc_2(out))
-            out = self.fc_3(out)
+            # out = x.view(x.size(0), -1)
+            out = F.relu(self.conv(x))
+            out = F.relu(self.deconv(out))
             return out
 
-    # Code for phi is modified from networks.py:
-    #   make output shape the same as input shape, this network is meant to 
-    #   'transform' images.
-    # Note:
-    #   channel==1 is only for black and white images I guess
-    #   The fact that the size if channel==1 is 28x28 implies to me that it's 
-    #       probably only meant for MNIST.
+    # Think I need to init more cleverly. Right now, input and output look too
+    # different. But maybe that will change with training.
+    """
+    (Pdb) image_real[0, 0, :, :]
+    tensor([[ 0.3976, -1.3064, -1.0857,  ...,  1.2897, -0.0504, -1.4671],
+            [ 1.0685, -1.8757,  0.6853,  ..., -1.1383,  1.4798, -1.0195],
+            [-1.1319,  1.0462, -0.8972,  ..., -0.5163, -0.2672,  0.7596],
+            ...,
+            [ 0.6138, -0.2225,  0.1494,  ...,  0.9070, -1.1290,  1.4874],
+            [-1.0087,  1.9210, -0.4394,  ...,  0.2570,  0.7771, -1.4008],
+            [-0.4963, -1.1279,  0.6102,  ..., -1.5541,  0.7585,  0.4951]]) 
 
-    #phi = MLP_dist(channel, num_classes)
+    (Pdb) image_syn[0, 0, :, :]
+    tensor([[0.0000, 0.0000, 0.0000,  ..., 0.0706, 0.1639, 0.0928],
+            [0.0000, 0.1674, 0.5349,  ..., 0.0000, 0.0000, 0.1134],
+            [0.0000, 0.0000, 0.0000,  ..., 0.0000, 0.2014, 0.0000],
+            ...,
+            [0.0886, 0.0000, 0.0000,  ..., 0.0000, 0.6641, 0.0000],
+            [0.0000, 0.0000, 0.0092,  ..., 0.2496, 0.0000, 0.2161],
+            [0.0000, 0.0000, 0.0000,  ..., 0.0000, 0.0000, 0.0000]],        
+    """
 
-    phi = nn.Conv2d(3, 3, 3, stride=2)
-
+    phi = DistNet()
     syn_lr = torch.tensor(args.lr_teacher).to(args.device)
-
-
-    # testing stuff
-
-    # We reuse code which was used to init synthetic data in the distillation algorithm
-    label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9] if args.ipc=3, num_classes=10
-    image_real = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
-    image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
-    
-    import pdb; pdb.set_trace()
-    
-    # Now pass these images through phi to get 'synthetic' images
-    image_syn = phi(image_real)
-
 
     #--------------------------------------------------------------------------#
     #--------------------------------------------------------------------------#
@@ -252,7 +250,7 @@ def main(args):
 
     # Description for this parameter:
     #   only use if you can fit all expert trajectories into RAM
-    # So we won't run the program with argument '--load_all'
+    # So we will not run with argument '--load_all'
     if args.load_all:
         buffer = []
         n = 0
@@ -291,11 +289,12 @@ def main(args):
         # writer.add_scalar('Progress', it, it)
         wandb.log({"Progress": it}, step=it)
         ''' Evaluate synthetic data '''
-        # What I think this block does:
+        # What this block does:
         #   inits a random model
-        #   trains it on the current version of the synthetic dataset
+        #   trains it on the current version of the synthetic dataset and evaluates it
+        #   repeats this for each type of evaluation model, for num_eval times
         if it in eval_it_pool:
-            for model_eval in model_eval_pool:
+            for model_eval in model_eval_pool: # if eval_mode != 'S', we can evaluate on multiple architectures
                 print('-------------------------\nEvaluation\nmodel_train = %s, model_eval = %s, iteration = %d'%(args.model, model_eval, it))
                 if args.dsa:
                     print('DSA augmentation strategy: \n', args.dsa_strategy)
@@ -305,18 +304,23 @@ def main(args):
 
                 accs_test = []
                 accs_train = []
-                for it_eval in range(args.num_eval):
+                for it_eval in range(args.num_eval): # By default, this loop runs five times
                     net_eval = get_network(model_eval, channel, num_classes, im_size).to(args.device) # get a random model
 
 
+                    #----------------------------------------------------------#
                     """ Sample a random batch of images and corresponding labels """
-                    # We reuse code which was used to init synthetic data in the distillation algorithm
+                    # Reuse code which was used to init synthetic data
                     label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9] if args.ipc=3, num_classes=10
                     image_real = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
                     image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
-                    # Now pass these images through phi to get 'synthetic' images
+                    
+                    image_real = image_real.detach().to(args.device).requires_grad_(True)
+                    
+                    # pass these images through phi to get 'synthetic' images
                     image_syn = phi(image_real)
-
+                    image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+                    #----------------------------------------------------------#
 
                     eval_labs = label_syn
                     with torch.no_grad():
@@ -341,7 +345,10 @@ def main(args):
                 wandb.log({'Std/{}'.format(model_eval): acc_test_std}, step=it)
                 wandb.log({'Max_Std/{}'.format(model_eval): best_std[model_eval]}, step=it)
 
-
+        # This entire block is to save the synthetic images
+        # We will ignore it for now
+        # We will later replace it with a block which saves the parameters of phi
+        """
         if it in eval_it_pool and (save_this_it or it % 1000 == 0):
             with torch.no_grad():
                 image_save = image_syn.cuda()
@@ -404,10 +411,12 @@ def main(args):
                             grid = torchvision.utils.make_grid(upsampled, nrow=10, normalize=True, scale_each=True)
                             wandb.log({"Clipped_Reconstructed_Images/std_{}".format(clip_val): wandb.Image(
                                 torch.nan_to_num(grid.detach().cpu()))}, step=it)
+        #"""
 
         wandb.log({"Synthetic_LR": syn_lr.detach().cpu()}, step=it)
 
-        student_net = get_network(args.model, channel, num_classes, im_size, dist=False).to(args.device)  # get a random model
+        # get a random model
+        student_net = get_network(args.model, channel, num_classes, im_size, dist=False).to(args.device)  
 
         student_net = ReparamModule(student_net)
 
@@ -447,6 +456,20 @@ def main(args):
 
         starting_params = torch.cat([p.data.to(args.device).reshape(-1) for p in starting_params], 0)
 
+        #----------------------------------------------------------#
+        """ Sample a random batch of images and corresponding labels """
+        # Reuse code which was used to init synthetic data
+        label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9] if args.ipc=3, num_classes=10
+        image_real = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
+        image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
+        
+        image_real = image_real.detach().to(args.device).requires_grad_(True)
+        
+        # pass these images through phi to get 'synthetic' images
+        image_syn = phi(image_real)
+        image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+        #----------------------------------------------------------#
+
         syn_images = image_syn
 
         y_hat = label_syn.to(args.device)
@@ -484,7 +507,6 @@ def main(args):
             grad = torch.autograd.grad(ce_loss, student_params[-1], create_graph=True)[0]
 
             student_params.append(student_params[-1] - syn_lr * grad)
-
 
         param_loss = torch.tensor(0.0).to(args.device)
         param_dist = torch.tensor(0.0).to(args.device)

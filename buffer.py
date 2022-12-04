@@ -16,6 +16,9 @@ Working log:
 It runs! But it is doing differentiable Siamese augmentation, and zca whitening.
 I wanted to do the same thing, but with InstaAug: not differentiable Siamese. Still, I will leave it in for now.
 Not sure what to do about zca whitening. I'll leave it in for now.
+
+Generating expert trajectories for real:
+python3 buffer.py --dataset=CIFAR10 --model=ConvNet --train_epochs=30 --num_experts=20 --zca --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10
 """
 
 import os
