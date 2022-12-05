@@ -1,19 +1,66 @@
 """
+DEVELOPMENT LOG
+
 This file actually does the distillation, once we've got expert trajectories
 
-The following command will then use the buffers we just generated to distill CIFAR-100 down to just 1 image per class:
+The following command will then use the buffers we just generated to distill 
+CIFAR-100 down to just 1 image per class:
 python distill.py --dataset=CIFAR100 --ipc=1 --syn_steps=20 --expert_epochs=3 --max_start_epoch=20 --zca --lr_img=1000 --lr_lr=1e-05 --lr_teacher=0.01 --buffer_path={path_to_buffer_storage} --data_path={path_to_dataset}
 
 Todo:
-- This file needs to be modified to update a network instead of updating a synthetic dataset.
+- This file needs to be modified to update a network instead of updating a 
+    synthetic dataset.
 
-Run commands
+First run command (I used cs330 env, just had to pip install wandb):
 python distill.py --dataset=CIFAR10 --ipc=1 --syn_steps=5 --expert_epochs=3 --max_start_epoch=4 --zca --lr_img=1000 --lr_lr=1e-05 --lr_teacher=0.01 --buffer_path=./cifar-10-buffers --data_path=./cifar-10 --Iteration 100 --eval_it 10
-Note: I used cs330 env, I had to 'pip install wandb' before running. Everything else was already in cs330 env.
 
-Notes:
-    The parameter 'ipc' doesn't matter for us (images per class)
+Second run command (with longer and more expert trajectories):
+python distill.py --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --lr_img=1000 --lr_lr=1e-05 --lr_teacher=0.01 --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10
 
+Problem: Learning rate goes negative. 
+    Try again with --lr_teacher=0.0001. Still goes negative.
+    I just take abs value of learning rate when calling evaluate_synset
+Problem:
+    phi(X) looks very different (sparse) to X. 
+    Trying to fix this:
+        Introduce a skip connection in the network.
+
+Third run command (Run for 2k iter rather than 5k, with skip connection):
+python distill.py --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --lr_img=1000 --lr_lr=1e-05 --lr_teacher=0.01 --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 1 --Iteration 2000
+
+Modification:
+    Add an argument --fix_pre_synth_set. 
+    When this argument is passed, each time we want to evaluate phi, we pass the 
+        SAME set of real images through (a hopefully updated) phi. Analogous to 
+        how in the original dataset distillation algo, we init synthetic set 
+        from some set of images, then keep updating this set.
+
+Fourth run command (fixing pre-synth set): 
+python distill.py --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --lr_img=1000 --lr_lr=1e-05 --lr_teacher=0.01 --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 1 --Iteration 2000 --fix_pre_synth_set
+
+Problem:
+    PHI IS NOT UPDATING (at least from looking at synthetic images)
+    Trying to fix this:
+        Modify code to plot average ce_loss
+        Modify DistNet to have two more trainable params:
+            scale parameter for noise
+            scale parameter for skip connection
+    phi is still not updating :(
+    Next thing to try:
+        Give DistNet more freedom:
+            remove skip connection (this doesn't help)
+            add another conv and deconv layer (not tried this yet)
+        
+more things to try:
+    fix syn_lr. It goes to zero very quickly at the moment.
+        run with --fix_syn_lr --lr_img 0.01
+    it seems we can get lucky by fixing the synth-set.
+
+Fifth run command (fixing learning rate):
+python distill.py --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --lr_img=0.01 --lr_lr=1e-05 --lr_teacher=0.01 --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 1 --Iteration 2000 --fix_pre_synth_set --fix_syn_lr
+
+Todo:
+    - Figure out whether phi is updating or not.
 """
 
 import os
@@ -128,34 +175,37 @@ def main(args):
     #--------------------------------------------------------------------------#
     #--------------------------------------------------------------------------#
     ''' initialize the synthetic data '''
-    """
-    label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9]
+    #"""
+    pre_label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9]
 
-    if args.texture:
-        image_syn = torch.randn(size=(num_classes * args.ipc, channel, im_size[0]*args.canvas_size, im_size[1]*args.canvas_size), dtype=torch.float)
-    else:
-        image_syn = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
+    #if args.texture:
+    #    image_syn = torch.randn(size=(num_classes * args.ipc, channel, im_size[0]*args.canvas_size, im_size[1]*args.canvas_size), dtype=torch.float)
+    #else:
+    pre_image_syn = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
 
-    syn_lr = torch.tensor(args.lr_teacher).to(args.device)
+    if not args.fix_syn_lr:
+        syn_lr = torch.tensor(args.lr_teacher).to(args.device)
 
-    if args.pix_init == 'real':
-        print('initialize synthetic data from random real images')
-        if args.texture:
-            for c in range(num_classes):
-                for i in range(args.canvas_size):
-                    for j in range(args.canvas_size):
-                        image_syn.data[c * args.ipc:(c + 1) * args.ipc, :, i * im_size[0]:(i + 1) * im_size[0],
-                        j * im_size[1]:(j + 1) * im_size[1]] = torch.cat(
-                            [get_images(c, 1).detach().data for s in range(args.ipc)])
-        for c in range(num_classes):
-            image_syn.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
-    else:
-        print('initialize synthetic data from random noise')
+    #if args.pix_init == 'real':
+    #    print('initialize synthetic data from random real images')
+    #    if args.texture:
+    #        for c in range(num_classes):
+    #            for i in range(args.canvas_size):
+    #                for j in range(args.canvas_size):
+    #                    image_syn.data[c * args.ipc:(c + 1) * args.ipc, :, i * im_size[0]:(i + 1) * im_size[0],
+    #                    j * im_size[1]:(j + 1) * im_size[1]] = torch.cat(
+    #                        [get_images(c, 1).detach().data for s in range(args.ipc)])
+    #    for c in range(num_classes):
+    #        pre_image_syn.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
+    for c in range(num_classes):
+        pre_image_syn.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
+    #else:
+    #    print('initialize synthetic data from random noise')
     #"""
 
 
 
-    """ MODIFICATIONS
+    """ MODIFICATIONS (outdated)
     Instead of initialising synthetic data, we want to initialise a network.
     We call this a 'distillation network', and refer to it as phi.
 
@@ -167,33 +217,19 @@ def main(args):
     We can init syn_lr as above, as the learning rate for the network phi
     This learning rate is also learned, in the style of MAML.
 
-
     In the block below we need to define a network:
         What architecture do we use? 
-            For the first try, just to get the code to run, use an MLP.
+            For the first try, just to get the code to run, we use conv layer
+            and deconv layer (input shape must be same as output)
         How complex should it be?
             For CIFAR-10, 10 synthetic images (1 per class), 32x32 images, we 
-            have 1024 * 10 = 10240 parameters. An MLP has at minimum 32x32x3 
+            have 1024 * 10 = 10240 parameters. Ideally we only need a similar 
+            amount of params?
 
     We also need to deal with labels. We will define the ground truth labels of 
     each augmented image to be the same as the label of the corresponding input 
     image.
     """
-
-    ''' initialise distillation network phi, and synthetic learning rate '''
-    class DistNet(nn.Module):
-        def __init__(self):
-            super(DistNet, self).__init__()
-            self.conv = nn.Conv2d(3, 6, 3, stride=1)
-            #torch.nn.init.xavier_uniform(self.conv.weight)
-            #torch.nn.init.normal_(self.conv.weight)
-            self.deconv = nn.ConvTranspose2d(6, 3, 3, stride=1)
-
-        def forward(self, x):
-            # out = x.view(x.size(0), -1)
-            out = F.relu(self.conv(x))
-            out = F.relu(self.deconv(out))
-            return out
 
     # Think I need to init more cleverly. Right now, input and output look too
     # different. But maybe that will change with training.
@@ -214,30 +250,88 @@ def main(args):
             ...,
             [0.0886, 0.0000, 0.0000,  ..., 0.0000, 0.6641, 0.0000],
             [0.0000, 0.0000, 0.0092,  ..., 0.2496, 0.0000, 0.2161],
-            [0.0000, 0.0000, 0.0000,  ..., 0.0000, 0.0000, 0.0000]],        
+            [0.0000, 0.0000, 0.0000,  ..., 0.0000, 0.0000, 0.0000]],      
+    """
+    # Update: added a skip connection, and the input and output look much more 
+    # similar. Is this what we want though?
+
+
+
+    ''' initialise distillation network phi, and synthetic learning rate '''
+    """
+    class DistNet(nn.Module):
+        def __init__(self):
+            super(DistNet, self).__init__()
+            self.conv = nn.Conv2d(3, 6, 3, stride=1)
+            self.deconv = nn.ConvTranspose2d(6, 3, 3, stride=1)
+
+        def forward(self, x):
+            out = F.relu(self.conv(x))
+            out += torch.normal(out)        # add stochasticity
+            out = self.deconv(out)
+            return 0.001 * out + x          # add skip connection
     """
 
-    phi = DistNet()
-    syn_lr = torch.tensor(args.lr_teacher).to(args.device)
+    class DistNet(nn.Module):
+        def __init__(self):
+            super(DistNet, self).__init__()
+            self.conv = nn.Conv2d(3, 6, 3, stride=1)
+            self.deconv = nn.ConvTranspose2d(6, 3, 3, stride=1)
+
+            # learnable scale parameters
+            self.scale1 = nn.Parameter(torch.tensor([0.001]))
+            self.scale2 = nn.Parameter(torch.tensor([0.001]))
+
+        def forward(self, x):
+            out = F.relu(self.conv(x))
+            out += self.scale1 * torch.normal(out)        # add stochasticity
+            out = self.deconv(out)
+            return self.scale2 * out + x                  # add skip connection
+
+    class DistNet2(nn.Module):
+        def __init__(self):
+            super(DistNet2, self).__init__()
+            self.conv = nn.Conv2d(3, 6, 3, stride=1)
+            self.conv2 = nn.Conv2d(6, 12, 3, stride=1)
+            self.deconv2 = nn.ConvTranspose2d(12, 6, 3, stride=1) 
+            self.deconv = nn.ConvTranspose2d(6, 3, 3, stride=1)
+
+            # learnable scale parameters
+            self.scale1 = nn.Parameter(torch.tensor([0.001]))
+            self.scale2 = nn.Parameter(torch.tensor([0.001]))
+
+        def forward(self, x):
+            out = F.relu(self.conv(x))
+            out = F.relu(self.conv2(out))
+            out += self.scale1 * torch.normal(out)        # add stochasticity
+            out = F.relu(self.deconv2(out))
+            out = self.deconv(out)
+            return self.scale2 * out + x                  # add skip connection
+
+
+    #phi = DistNet()
+    phi = DistNet2()
 
     #--------------------------------------------------------------------------#
     #--------------------------------------------------------------------------#
-
-
     ''' training '''
-    #image_syn = image_syn.detach().to(args.device).requires_grad_(True)
-    phi.to(args.device)
+    pre_image_syn = pre_image_syn.detach().to(args.device).requires_grad_(True)
+    phi.to(args.device)      # added this
 
-    syn_lr = syn_lr.detach().to(args.device).requires_grad_(True)
+    if not args.fix_syn_lr:
+        syn_lr = syn_lr.detach().to(args.device).requires_grad_(True)
 
     #optimizer_img = torch.optim.SGD([image_syn], lr=args.lr_img, momentum=0.5)
     optimizer_img = torch.optim.SGD(phi.parameters(), lr=args.lr_img, momentum=0.5)
-    
-    optimizer_lr = torch.optim.SGD([syn_lr], lr=args.lr_lr, momentum=0.5)
     optimizer_img.zero_grad()
+
+    if not args.fix_syn_lr:
+        optimizer_lr = torch.optim.SGD([syn_lr], lr=args.lr_lr, momentum=0.5)
+        optimizer_lr.zero_grad()
 
     criterion = nn.CrossEntropyLoss().to(args.device)
     print('%s training begins'%get_time())
+
 
     ''' Get Expert Trajectories '''
     expert_dir = os.path.join(args.buffer_path, args.dataset)
@@ -248,9 +342,10 @@ def main(args):
     expert_dir = os.path.join(expert_dir, args.model)
     print("Expert Dir: {}".format(expert_dir))
 
-    # Description for this parameter:
+
+    # Description for parameter 'load_all':
     #   only use if you can fit all expert trajectories into RAM
-    # So we will not run with argument '--load_all'
+    # We will not run with argument '--load_all', this block can be ignored
     if args.load_all:
         buffer = []
         n = 0
@@ -259,7 +354,6 @@ def main(args):
             n += 1
         if n == 0:
             raise AssertionError("No buffers detected at {}".format(expert_dir))
-
     else:
         expert_files = []
         n = 0
@@ -273,14 +367,14 @@ def main(args):
         random.shuffle(expert_files)
         if args.max_files is not None:
             expert_files = expert_files[:args.max_files]
-        print("loading file {}".format(expert_files[file_idx]))
+        #print("loading file {}".format(expert_files[file_idx]))
         buffer = torch.load(expert_files[file_idx])
         if args.max_experts is not None:
             buffer = buffer[:args.max_experts]
         random.shuffle(buffer)
 
-    best_acc = {m: 0 for m in model_eval_pool}
 
+    best_acc = {m: 0 for m in model_eval_pool}
     best_std = {m: 0 for m in model_eval_pool}
 
     for it in range(0, args.Iteration+1):
@@ -288,14 +382,17 @@ def main(args):
 
         # writer.add_scalar('Progress', it, it)
         wandb.log({"Progress": it}, step=it)
-        ''' Evaluate synthetic data '''
+
+        #--------------------------- EVAL STEP --------------------------------#
         # What this block does:
         #   inits a random model
         #   trains it on the current version of the synthetic dataset and evaluates it
-        #   repeats this for each type of evaluation model, for num_eval times
+        #   repeats this for num_eval times for each type of evaluation model
+    
         if it in eval_it_pool:
-            for model_eval in model_eval_pool: # if eval_mode != 'S', we can evaluate on multiple architectures
+            for model_eval in model_eval_pool: # if eval_mode != 'S', we can evaluate on multiple architectures. See 'get_eval_pool' in utils.py
                 print('-------------------------\nEvaluation\nmodel_train = %s, model_eval = %s, iteration = %d'%(args.model, model_eval, it))
+                
                 if args.dsa:
                     print('DSA augmentation strategy: \n', args.dsa_strategy)
                     print('DSA augmentation parameters: \n', args.dsa_param.__dict__)
@@ -304,22 +401,27 @@ def main(args):
 
                 accs_test = []
                 accs_train = []
-                for it_eval in range(args.num_eval): # By default, this loop runs five times
+                for it_eval in range(args.num_eval):
                     net_eval = get_network(model_eval, channel, num_classes, im_size).to(args.device) # get a random model
 
-
                     #----------------------------------------------------------#
-                    """ Sample a random batch of images and corresponding labels """
-                    # Reuse code which was used to init synthetic data
-                    label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9] if args.ipc=3, num_classes=10
-                    image_real = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
-                    image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
-                    
-                    image_real = image_real.detach().to(args.device).requires_grad_(True)
-                    
-                    # pass these images through phi to get 'synthetic' images
-                    image_syn = phi(image_real)
-                    image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+                    if args.fix_pre_synth_set:
+                        image_syn = phi(pre_image_syn)
+                        image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+                        label_syn = pre_label_syn
+                    else:
+                        # Sample a random batch of images and corresponding labels
+                        # Reuse code which was used to init synthetic data
+                        label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9] if args.ipc=3, num_classes=10
+                        image_real = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
+                        for c in range(num_classes):
+                            image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
+                        
+                        image_real = image_real.detach().to(args.device).requires_grad_(True)
+                        
+                        # pass these images through phi to get 'synthetic' images
+                        image_syn = phi(image_real)
+                        image_syn = image_syn.detach().to(args.device).requires_grad_(True)
                     #----------------------------------------------------------#
 
                     eval_labs = label_syn
@@ -327,7 +429,12 @@ def main(args):
                         image_save = image_syn
                     image_syn_eval, label_syn_eval = copy.deepcopy(image_save.detach()), copy.deepcopy(eval_labs.detach()) # avoid any unaware modification
 
-                    args.lr_net = syn_lr.item()
+                    #args.lr_net = syn_lr.item()
+                    if not args.fix_syn_lr:
+                        args.lr_net = torch.abs(syn_lr).item() # sometimes syn_lr is negative, which raises ValueError
+                    else:
+                        args.lr_net = torch.tensor(args.lr_img).item() # use a fixed lr, lr_img
+
                     _, acc_train, acc_test = evaluate_synset(it_eval, net_eval, image_syn_eval, label_syn_eval, testloader, args, texture=args.texture)
                     accs_test.append(acc_test)
                     accs_train.append(acc_train)
@@ -345,11 +452,30 @@ def main(args):
                 wandb.log({'Std/{}'.format(model_eval): acc_test_std}, step=it)
                 wandb.log({'Max_Std/{}'.format(model_eval): best_std[model_eval]}, step=it)
 
-        # This entire block is to save the synthetic images
-        # We will ignore it for now
-        # We will later replace it with a block which saves the parameters of phi
-        """
-        if it in eval_it_pool and (save_this_it or it % 1000 == 0):
+
+        """ This entire block is to save the synthetic images """
+        # if it in eval_it_pool and (save_this_it or it % 1000 == 0):
+        if it in eval_it_pool:  # save images each time we evaluate
+            #----------------------------------------------------------#
+            if args.fix_pre_synth_set:
+                image_syn = phi(pre_image_syn)
+                image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+                label_syn = pre_label_syn
+            else:
+                # Sample a random batch of images and corresponding labels
+                # Reuse code which was used to init synthetic data
+                label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9] if args.ipc=3, num_classes=10
+                image_real = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
+                for c in range(num_classes):
+                    image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
+                
+                image_real = image_real.detach().to(args.device).requires_grad_(True)
+                
+                # pass these images through phi to get 'synthetic' images
+                image_syn = phi(image_real)
+                image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+            #----------------------------------------------------------#
+
             with torch.no_grad():
                 image_save = image_syn.cuda()
 
@@ -411,9 +537,11 @@ def main(args):
                             grid = torchvision.utils.make_grid(upsampled, nrow=10, normalize=True, scale_each=True)
                             wandb.log({"Clipped_Reconstructed_Images/std_{}".format(clip_val): wandb.Image(
                                 torch.nan_to_num(grid.detach().cpu()))}, step=it)
-        #"""
 
-        wandb.log({"Synthetic_LR": syn_lr.detach().cpu()}, step=it)
+        if not args.fix_syn_lr:
+            wandb.log({"Synthetic_LR": syn_lr.detach().cpu()}, step=it)
+        else:
+            wandb.log({"Synthetic_LR": args.lr_img}, step=it)
 
         # get a random model
         student_net = get_network(args.model, channel, num_classes, im_size, dist=False).to(args.device)  
@@ -438,7 +566,7 @@ def main(args):
                 if file_idx == len(expert_files):
                     file_idx = 0
                     random.shuffle(expert_files)
-                print("loading file {}".format(expert_files[file_idx]))
+                #print("loading file {}".format(expert_files[file_idx]))
                 if args.max_files != 1:
                     del buffer
                     buffer = torch.load(expert_files[file_idx])
@@ -457,17 +585,23 @@ def main(args):
         starting_params = torch.cat([p.data.to(args.device).reshape(-1) for p in starting_params], 0)
 
         #----------------------------------------------------------#
-        """ Sample a random batch of images and corresponding labels """
-        # Reuse code which was used to init synthetic data
-        label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9] if args.ipc=3, num_classes=10
-        image_real = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
-        image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
-        
-        image_real = image_real.detach().to(args.device).requires_grad_(True)
-        
-        # pass these images through phi to get 'synthetic' images
-        image_syn = phi(image_real)
-        image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+        if args.fix_pre_synth_set:
+            image_syn = phi(pre_image_syn)
+            image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+            label_syn = pre_label_syn
+        else:
+            # Sample a random batch of images and corresponding labels
+            # Reuse code which was used to init synthetic data
+            label_syn = torch.tensor([np.ones(args.ipc,dtype=np.int_)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9] if args.ipc=3, num_classes=10
+            image_real = torch.randn(size=(num_classes * args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float)
+            for c in range(num_classes):
+                image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
+            
+            image_real = image_real.detach().to(args.device).requires_grad_(True)
+            
+            # pass these images through phi to get 'synthetic' images
+            image_syn = phi(image_real)
+            image_syn = image_syn.detach().to(args.device).requires_grad_(True)
         #----------------------------------------------------------#
 
         syn_images = image_syn
@@ -478,6 +612,7 @@ def main(args):
         param_dist_list = []
         indices_chunks = []
 
+        ce_losses = torch.tensor([])  # record ce_losses
         for step in range(args.syn_steps):
 
             if not indices_chunks:
@@ -503,10 +638,19 @@ def main(args):
                 forward_params = student_params[-1]
             x = student_net(x, flat_param=forward_params)
             ce_loss = criterion(x, this_y)
-
+            
+            ce_losses = torch.cat((ce_losses, torch.tensor([ce_loss]))) # record ce_losses
+            
             grad = torch.autograd.grad(ce_loss, student_params[-1], create_graph=True)[0]
 
-            student_params.append(student_params[-1] - syn_lr * grad)
+            if not args.fix_syn_lr:
+                student_params.append(student_params[-1] - syn_lr * grad)
+            else:
+                student_params.append(student_params[-1] - args.lr_img * grad)
+    
+        # log average ce_loss for each iteration
+        avg_ce_loss = torch.mean(ce_losses)
+        wandb.log({"Avg_CE_loss": avg_ce_loss.detach().cpu()}, step=it)
 
         param_loss = torch.tensor(0.0).to(args.device)
         param_dist = torch.tensor(0.0).to(args.device)
@@ -517,7 +661,6 @@ def main(args):
         param_loss_list.append(param_loss)
         param_dist_list.append(param_dist)
 
-
         param_loss /= num_params
         param_dist /= num_params
 
@@ -526,12 +669,14 @@ def main(args):
         grand_loss = param_loss
 
         optimizer_img.zero_grad()
-        optimizer_lr.zero_grad()
+        if not args.fix_syn_lr:
+            optimizer_lr.zero_grad()
 
         grand_loss.backward()
 
         optimizer_img.step()
-        optimizer_lr.step()
+        if not args.fix_syn_lr:
+            optimizer_lr.step()
 
         wandb.log({"Grand_Loss": grand_loss.detach().cpu(),
                    "Start_Epoch": start_epoch})
@@ -608,8 +753,10 @@ if __name__ == '__main__':
 
     parser.add_argument('--force_save', action='store_true', help='this will save images for 50ipc')
 
+    # Add my own arguments
+    parser.add_argument('--fix_pre_synth_set', action='store_true')
+    parser.add_argument('--fix_syn_lr', action='store_true')
+
     args = parser.parse_args()
 
     main(args)
-
-

@@ -362,6 +362,10 @@ def evaluate_synset(it_eval, net, images_train, labels_train, testloader, args, 
     Epoch = int(args.epoch_eval_train)
     lr_schedule = [Epoch//2+1]
     optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
+    # Passing a negative lr in the line above throws a ValueError
+    # To get around this, we can reimplement SGD ourselves: get the gradient, 
+    #   and write 'new params = old params - learning rate * gradient'
+    # Or just pass the modulus of the learning rate to this function.
 
     criterion = nn.CrossEntropyLoss().to(args.device)
 
