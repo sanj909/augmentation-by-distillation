@@ -17,7 +17,7 @@ python distill.py --dataset=CIFAR10 --ipc=1 --syn_steps=5 --expert_epochs=3 --ma
 Second run command (with longer and more expert trajectories):
 python distill.py --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --lr_img=1000 --lr_lr=1e-05 --lr_teacher=0.01 --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10
 
-Problem: Learning rate goes negative. 
+Problem: Learning rate goes negative.
     Try again with --lr_teacher=0.0001. Still goes negative.
     I just take abs value of learning rate when calling evaluate_synset
 Problem:
@@ -56,11 +56,49 @@ more things to try:
         run with --fix_syn_lr --lr_img 0.01
     it seems we can get lucky by fixing the synth-set.
 
-Fifth run command (fixing learning rate):
+Fifth run command (fixing learning rate, we don't always run with this. Fourth command is still default.):
 python distill.py --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --lr_img=0.01 --lr_lr=1e-05 --lr_teacher=0.01 --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 1 --Iteration 2000 --fix_pre_synth_set --fix_syn_lr
 
-Todo:
-    - Figure out whether phi is updating or not.
+FIXED Problem of phi not updating!
+The problem was that we were detaching image_syn before doing gradient matching,
+    so phi wasn't connected to the same computation graph as the grand loss. 
+
+Problem:
+    - Now, after looking at the saved images (albeit with variable lr, which stays very
+    close to zero) it seems that the DistNet 2 does not have enough freedom to manipulate 
+    input images. phi(X) still looks a bit like X, whereas with the actual distilled 
+    images in dataset distillation, distilled images are very different from the raw ones.
+    - Also, all the images end up being a similar colour: all purple, or all 
+    all green, or all blue, etc. Why? It's like colour data gets erased
+    - Can I structure phi so that it manipulates each pixel individually, instead of 
+    doing a conv layer which does some averaging? Try kernel size = 1 (dense)
+
+Problem I have ignored so far:
+    - Why is eval train accuracy always 1.0, but eval test accuracy always dogshit?
+
+
+
+
+
+Fix syn_lr, fixed pre-synth set
+python distill.py --fix_pre_synth_set --fix_syn_lr --lr_teacher=0.01 --lr_img=0.01 --Iteration 200 --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 1 
+(lr_teacher is too big here) python distill.py --fix_pre_synth_set --fix_syn_lr --lr_teacher=0.1 --lr_img=0.01 --Iteration=2000 --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 1 
+python distill.py --fix_pre_synth_set --fix_syn_lr --lr_teacher=0.01 --lr_img=0.1 --Iteration 2000 --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 1 
+python distill.py --fix_pre_synth_set --fix_syn_lr --lr_teacher=0.01 --lr_img=1.0 --Iteration 2000 --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 1 
+
+
+Fix syn_lr, non-fixed pre-synth set:
+python distill.py --fix_syn_lr --lr_teacher=0.01 --lr_img=0.01 --Iteration 200 --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 1 
+
+Non fixed syn_lr, fixed pre-synth set (still, syn_lr hovers around zero)
+python distill.py --fix_pre_synth_set --lr_img=0.01 --Iteration 200 --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 1 
+
+DistNet7() (doesn't work, w/o skip connection the outputs are meaningless)
+python distill.py --fix_pre_synth_set --fix_syn_lr --lr_teacher=0.01 --lr_img=0.01 --Iteration 2000 --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 1 
+
+DistNet2()
+python distill.py --fix_syn_lr --lr_teacher=0.01 --lr_img=0.01 --Iteration 2000 --dataset=CIFAR10 --ipc=1 --syn_steps=12 --expert_epochs=3 --max_start_epoch=12 --zca --buffer_path=./cifar-10-buffers-2 --data_path=./cifar-10 --num_eval 5 
+
 """
 
 import os
@@ -79,6 +117,8 @@ from reparam_module import ReparamModule
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+torch.autograd.set_detect_anomaly(True)
 
 def main(args):
 
@@ -204,18 +244,10 @@ def main(args):
     #"""
 
 
-
-    """ MODIFICATIONS (outdated)
+    #----------------------------- MODIFICATIONS ------------------------------#
+    """
     Instead of initialising synthetic data, we want to initialise a network.
     We call this a 'distillation network', and refer to it as phi.
-
-    Above, they initialise three variables:
-        label_syn
-        image_syn
-        syn_lr
-
-    We can init syn_lr as above, as the learning rate for the network phi
-    This learning rate is also learned, in the style of MAML.
 
     In the block below we need to define a network:
         What architecture do we use? 
@@ -223,17 +255,15 @@ def main(args):
             and deconv layer (input shape must be same as output)
         How complex should it be?
             For CIFAR-10, 10 synthetic images (1 per class), 32x32 images, we 
-            have 1024 * 10 = 10240 parameters. Ideally we only need a similar 
+            have 1024 * 10 = 10240 parameters. Ideally we only want a similar 
             amount of params?
 
     We also need to deal with labels. We will define the ground truth labels of 
     each augmented image to be the same as the label of the corresponding input 
     image.
-    """
 
-    # Think I need to init more cleverly. Right now, input and output look too
-    # different. But maybe that will change with training.
-    """
+    Update: Think I need to init more cleverly. Right now, input and output look 
+    too different. But maybe that will change with training.
     (Pdb) image_real[0, 0, :, :]
     tensor([[ 0.3976, -1.3064, -1.0857,  ...,  1.2897, -0.0504, -1.4671],
             [ 1.0685, -1.8757,  0.6853,  ..., -1.1383,  1.4798, -1.0195],
@@ -250,15 +280,16 @@ def main(args):
             ...,
             [0.0886, 0.0000, 0.0000,  ..., 0.0000, 0.6641, 0.0000],
             [0.0000, 0.0000, 0.0092,  ..., 0.2496, 0.0000, 0.2161],
-            [0.0000, 0.0000, 0.0000,  ..., 0.0000, 0.0000, 0.0000]],      
-    """
-    # Update: added a skip connection, and the input and output look much more 
-    # similar. Is this what we want though?
+            [0.0000, 0.0000, 0.0000,  ..., 0.0000, 0.0000, 0.0000]], 
 
+    Update: added a skip connection, and the input and output look much more 
+    similar. Is this what we want though? Maybe they are too similar.
+    """
 
 
     ''' initialise distillation network phi, and synthetic learning rate '''
-    """
+
+    # w/o learned scale params
     class DistNet(nn.Module):
         def __init__(self):
             super(DistNet, self).__init__()
@@ -267,14 +298,14 @@ def main(args):
 
         def forward(self, x):
             out = F.relu(self.conv(x))
-            out += torch.normal(out)        # add stochasticity
-            out = self.deconv(out)
-            return 0.001 * out + x          # add skip connection
-    """
+            out += torch.normal(out)     # add stochasticity
+            out = self.deconv(out)       # no second relu, since relu is non -ve
+            return 0.001 * out + x        # add skip connection
 
-    class DistNet(nn.Module):
+    # w learned scale params
+    class DistNet1_scale(nn.Module):
         def __init__(self):
-            super(DistNet, self).__init__()
+            super(DistNet1_scale, self).__init__()
             self.conv = nn.Conv2d(3, 6, 3, stride=1)
             self.deconv = nn.ConvTranspose2d(6, 3, 3, stride=1)
 
@@ -284,10 +315,14 @@ def main(args):
 
         def forward(self, x):
             out = F.relu(self.conv(x))
-            out += self.scale1 * torch.normal(out)        # add stochasticity
+
+            # can't backprop through!
+            out += self.scale1 * torch.normal(out)        # add stochasticity.
+            
             out = self.deconv(out)
             return self.scale2 * out + x                  # add skip connection
 
+    # with backroppable noise
     class DistNet2(nn.Module):
         def __init__(self):
             super(DistNet2, self).__init__()
@@ -297,19 +332,116 @@ def main(args):
             self.deconv = nn.ConvTranspose2d(6, 3, 3, stride=1)
 
             # learnable scale parameters
-            self.scale1 = nn.Parameter(torch.tensor([0.001]))
-            self.scale2 = nn.Parameter(torch.tensor([0.001]))
+            self.scale1 = nn.Parameter(torch.tensor([0.1]))
+            self.scale2 = nn.Parameter(torch.tensor([0.1]))
 
         def forward(self, x):
             out = F.relu(self.conv(x))
             out = F.relu(self.conv2(out))
-            out += self.scale1 * torch.normal(out)        # add stochasticity
+        
+            # backproppable noise: thanks to Suraj for the tip
+            # see https://pytorch.org/docs/stable/distributions.html#normal
+            # init a normal class with mean being out, stand dev being whatver you want 
+            # then use .rsample()
+            m = torch.distributions.normal.Normal(out, torch.ones_like(out))
+            out = self.scale1 * m.rsample()
+
             out = F.relu(self.deconv2(out))
             out = self.deconv(out)
+
+            print(self.scale1, self.scale2)
+
             return self.scale2 * out + x                  # add skip connection
 
+    # Dense network w/o skip connection
+    class DistNet3(nn.Module):
+        def __init__(self):
+            super(DistNet3, self).__init__()
+            self.conv = nn.Conv2d(3, 3, 1, stride=1)
+            self.conv2 = nn.Conv2d(3, 3, 1, stride=1)
 
-    #phi = DistNet()
+            self.noise_scale = nn.Parameter(torch.tensor([0.1]))
+
+        def forward(self, x):
+            out = F.relu(self.conv(x))
+            m = torch.distributions.normal.Normal(out, torch.ones_like(out))
+            out = self.noise_scale * m.rsample()
+            return self.conv2(out)
+
+    # Shallow dense network w/o skip connection and no noise
+    class DistNet4(nn.Module):
+        def __init__(self):
+            super(DistNet4, self).__init__()
+            self.conv = nn.Conv2d(3, 3, 1, stride=1)
+
+        def forward(self, x):
+            return self.conv(x)
+
+    # deep network w/o skip connection and no noise
+    class DistNet5(nn.Module):
+        def __init__(self):
+            super(DistNet5, self).__init__()
+            self.conv = nn.Conv2d(3, 3, 1, stride=1)
+            self.conv2 = nn.Conv2d(3, 3, 1, stride=1)
+            self.conv3 = nn.Conv2d(3, 3, 1, stride=1)
+            self.conv4 = nn.Conv2d(3, 3, 1, stride=1)
+            self.conv5 = nn.Conv2d(3, 3, 1, stride=1)
+
+        def forward(self, x):
+            return self.conv5(self.conv4(self.conv3(self.conv2(self.conv(x)))))
+
+    # wider version of DistNet2
+    class DistNet6(nn.Module):
+        def __init__(self):
+            super(DistNet6, self).__init__()
+            self.conv1 = nn.Conv2d(3, 9, 3, stride=1)
+            self.conv2 = nn.Conv2d(9, 27, 3, stride=1)
+
+            self.deconv1 = nn.ConvTranspose2d(27, 9, 3, stride=1) 
+            self.deconv2 = nn.ConvTranspose2d(9, 3, 3, stride=1)
+
+            # learnable scale parameters
+            self.scale1 = nn.Parameter(torch.tensor([0.1]))
+            self.scale2 = nn.Parameter(torch.tensor([0.1]))
+
+        def forward(self, x):
+            out = F.relu(self.conv1(x))
+            out = F.relu(self.conv2(out))
+        
+            # backproppable noise: thanks to Suraj for the tip
+            # see https://pytorch.org/docs/stable/distributions.html#normal
+            # init a normal class with mean being out, stand dev being whatver you want 
+            # then use .rsample()
+            m = torch.distributions.normal.Normal(out, torch.ones_like(out))
+            out = self.scale1 * m.rsample()
+
+            out = F.relu(self.deconv1(out))
+            out = self.deconv2(out)
+            return self.scale2 * out + x                  # add skip connection
+
+    # dense network
+    class DistNet7(nn.Module):
+        def __init__(self):
+            super(DistNet7, self).__init__()
+            self.linear1 = nn.Conv2d(3, 3, 1, stride=1)
+            self.linear2 = nn.Conv2d(3, 3, 1, stride=1)
+
+            # learnable scale parameters
+            #self.scale1 = nn.Parameter(torch.tensor([0.1]))
+            #self.scale2 = nn.Parameter(torch.tensor([0.1]))
+
+        def forward(self, x):
+            out = F.relu(self.linear1(x))
+
+            m = torch.distributions.normal.Normal(out, torch.ones_like(out))
+            out = 0.1 * m.rsample()
+
+            out = self.linear2(out)
+
+            #return self.scale2 * out + x                  # add skip connection
+            return out + x                                 
+
+
     phi = DistNet2()
 
     #--------------------------------------------------------------------------#
@@ -383,7 +515,8 @@ def main(args):
         # writer.add_scalar('Progress', it, it)
         wandb.log({"Progress": it}, step=it)
 
-        #--------------------------- EVAL STEP --------------------------------#
+
+        #---------------------START EVAL STEP ---------------------------------#
         # What this block does:
         #   inits a random model
         #   trains it on the current version of the synthetic dataset and evaluates it
@@ -407,7 +540,7 @@ def main(args):
                     #----------------------------------------------------------#
                     if args.fix_pre_synth_set:
                         image_syn = phi(pre_image_syn)
-                        image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+                        image_syn = image_syn.detach().to(args.device).requires_grad_(True) # detach is fine here since we're just evaluating
                         label_syn = pre_label_syn
                     else:
                         # Sample a random batch of images and corresponding labels
@@ -421,7 +554,7 @@ def main(args):
                         
                         # pass these images through phi to get 'synthetic' images
                         image_syn = phi(image_real)
-                        image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+                        image_syn = image_syn.detach().to(args.device).requires_grad_(True) # detach is fine here since we're just evaluating
                     #----------------------------------------------------------#
 
                     eval_labs = label_syn
@@ -433,7 +566,7 @@ def main(args):
                     if not args.fix_syn_lr:
                         args.lr_net = torch.abs(syn_lr).item() # sometimes syn_lr is negative, which raises ValueError
                     else:
-                        args.lr_net = torch.tensor(args.lr_img).item() # use a fixed lr, lr_img
+                        args.lr_net = torch.tensor(args.lr_teacher).item() # use a fixed lr, lr_teacher (this is the learning rate which usually used to init syn_lr)
 
                     _, acc_train, acc_test = evaluate_synset(it_eval, net_eval, image_syn_eval, label_syn_eval, testloader, args, texture=args.texture)
                     accs_test.append(acc_test)
@@ -442,6 +575,7 @@ def main(args):
                 accs_train = np.array(accs_train)
                 acc_test_mean = np.mean(accs_test)
                 acc_test_std = np.std(accs_test)
+
                 if acc_test_mean > best_acc[model_eval]:
                     best_acc[model_eval] = acc_test_mean
                     best_std[model_eval] = acc_test_std
@@ -451,9 +585,12 @@ def main(args):
                 wandb.log({'Max_Accuracy/{}'.format(model_eval): best_acc[model_eval]}, step=it)
                 wandb.log({'Std/{}'.format(model_eval): acc_test_std}, step=it)
                 wandb.log({'Max_Std/{}'.format(model_eval): best_std[model_eval]}, step=it)
+        #---------------------END EVAL STEP -----------------------------------#
 
 
-        """ This entire block is to save the synthetic images """
+
+        #---------------------START SAVE GENERATED IMAGES ---------------------#
+        """ This entire block is to save the 'synthetic' images """
         # if it in eval_it_pool and (save_this_it or it % 1000 == 0):
         if it in eval_it_pool:  # save images each time we evaluate
             #----------------------------------------------------------#
@@ -469,11 +606,11 @@ def main(args):
                 for c in range(num_classes):
                     image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
                 
-                image_real = image_real.detach().to(args.device).requires_grad_(True)
+                image_real = image_real.detach().to(args.device).requires_grad_(True) # detach is fine here since we're just saving
                 
                 # pass these images through phi to get 'synthetic' images
                 image_syn = phi(image_real)
-                image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+                image_syn = image_syn.detach().to(args.device).requires_grad_(True) # detach is fine here since we're just saving
             #----------------------------------------------------------#
 
             with torch.no_grad():
@@ -537,11 +674,16 @@ def main(args):
                             grid = torchvision.utils.make_grid(upsampled, nrow=10, normalize=True, scale_each=True)
                             wandb.log({"Clipped_Reconstructed_Images/std_{}".format(clip_val): wandb.Image(
                                 torch.nan_to_num(grid.detach().cpu()))}, step=it)
+        #-----------------------END SAVE GENERATED IMAGES ---------------------#
+        
 
+
+        #----------------------- START GRADIENT MATCHING  ---------------------#
+        # log learning rate
         if not args.fix_syn_lr:
             wandb.log({"Synthetic_LR": syn_lr.detach().cpu()}, step=it)
         else:
-            wandb.log({"Synthetic_LR": args.lr_img}, step=it)
+            wandb.log({"Synthetic_LR": args.lr_teacher}, step=it)
 
         # get a random model
         student_net = get_network(args.model, channel, num_classes, im_size, dist=False).to(args.device)  
@@ -587,7 +729,7 @@ def main(args):
         #----------------------------------------------------------#
         if args.fix_pre_synth_set:
             image_syn = phi(pre_image_syn)
-            image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+            image_syn = image_syn.to(args.device).requires_grad_(True) # do NOT detach, we don't want to break the computational graph to the network phi
             label_syn = pre_label_syn
         else:
             # Sample a random batch of images and corresponding labels
@@ -597,11 +739,11 @@ def main(args):
             for c in range(num_classes):
                 image_real.data[c * args.ipc:(c + 1) * args.ipc] = get_images(c, args.ipc).detach().data
             
-            image_real = image_real.detach().to(args.device).requires_grad_(True)
+            image_real = image_real.detach().to(args.device).requires_grad_(True) 
             
             # pass these images through phi to get 'synthetic' images
             image_syn = phi(image_real)
-            image_syn = image_syn.detach().to(args.device).requires_grad_(True)
+            image_syn = image_syn.to(args.device).requires_grad_(True) # do NOT detach, we don't want to break the computational graph to the network phi
         #----------------------------------------------------------#
 
         syn_images = image_syn
@@ -620,7 +762,6 @@ def main(args):
                 indices_chunks = list(torch.split(indices, args.batch_syn))
 
             these_indices = indices_chunks.pop()
-
 
             x = syn_images[these_indices]
             this_y = y_hat[these_indices]
@@ -646,7 +787,7 @@ def main(args):
             if not args.fix_syn_lr:
                 student_params.append(student_params[-1] - syn_lr * grad)
             else:
-                student_params.append(student_params[-1] - args.lr_img * grad)
+                student_params.append(student_params[-1] - args.lr_teacher * grad)
     
         # log average ce_loss for each iteration
         avg_ce_loss = torch.mean(ce_losses)
@@ -685,7 +826,9 @@ def main(args):
             del _
 
         if it%10 == 0:
-            print('%s iter = %04d, loss = %.4f' % (get_time(), it, grand_loss.item()))
+            print('%s iter = %04d, grand_loss = %.4f' % (get_time(), it, grand_loss.item()))
+
+        #------------------------ END GRADIENT MATCHING  ----------------------#
 
     wandb.finish()
 
